@@ -11,7 +11,7 @@ namespace IslandEye
         /// YOUR GitHub repository in "owner/name" form, e.g. "janedoe/Island".
         /// Island looks at the newest *Release* of this repo to find updates.
         /// </summary>
-        public const string GitHubRepo = "anshulsxd/YOUR_REPO_NAME";
+        public const string GitHubRepo = "anshulsxd/dynamic-island-for-win10-11";
 
         public static bool RepoConfigured =>
             !GitHubRepo.StartsWith("YOUR_", StringComparison.OrdinalIgnoreCase);
