@@ -110,13 +110,6 @@ namespace IslandEye
             };
             notch.CheckedChanged += (_, _) => _window?.SetNotchMode(notch.Checked);
 
-            var lite = new Forms.ToolStripMenuItem("Lite mode (smoother on low-end PCs)")
-            {
-                Checked = _window!.LiteMode,
-                CheckOnClick = true
-            };
-            lite.CheckedChanged += (_, _) => _window?.SetLiteMode(lite.Checked);
-
             var show = new Forms.ToolStripMenuItem("Show / Reset island");
             show.Click += (_, _) => _window?.ResetAndShow();
 
@@ -134,7 +127,6 @@ namespace IslandEye
 
             menu.Items.Add(startup);
             menu.Items.Add(notch);
-            menu.Items.Add(lite);
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add(show);
             menu.Items.Add(hide);

@@ -15,7 +15,8 @@ namespace IslandEye
     /// <summary>
     /// Watches Windows' notification history (%LocalAppData%\Microsoft\Windows\Notifications\wpndatabase.db)
     /// and raises an event for every new toast (system + third-party apps).
-    /// Read-only and 100% local. Keeps ONE read-only connection open and runs a tiny query every 1.5 s.
+    /// Read-only and 100% local. The official UserNotificationListener API needs a signed MSIX
+    /// package identity, which a portable .exe doesn't have, so this is the no-setup alternative.
     /// </summary>
     public sealed class NotificationWatcher : IDisposable
     {
@@ -27,29 +28,14 @@ namespace IslandEye
             "Microsoft", "Windows", "Notifications");
         private static readonly string DbPath = Path.Combine(Dir, "wpndatabase.db");
 
-        private const string Sql =
-            "SELECT n.\"Order\", n.Id, n.ArrivalTime, n.Payload, h.PrimaryId " +
-            "FROM Notification n LEFT JOIN NotificationHandler h ON n.HandlerId = h.RecordId " +
-            "WHERE n.Type = 'toast' COLLATE NOCASE AND n.ArrivalTime >= $since " +
-            "ORDER BY n.ArrivalTime";
-
         private readonly Dictionary<string, long> _seen = new();
         private readonly long _startFt = DateTime.UtcNow.AddSeconds(-1).ToFileTimeUtc();
         private readonly CancellationTokenSource _cts = new();
         private bool _useSnapshot, _announcedReady;
         private string _lastError = "";
 
-        private SqliteConnection? _con;
-        private SqliteCommand? _cmd;
-        private SqliteParameter? _since;
-
         public void Start() => _ = Task.Run(LoopAsync);
-
-        public void Dispose()
-        {
-            _cts.Cancel();
-            CloseLive();
-        }
+        public void Dispose() => _cts.Cancel();
 
         private async Task LoopAsync()
         {
@@ -66,7 +52,7 @@ namespace IslandEye
                 }
                 catch (Exception ex) { ReportError(ex.Message); }
 
-                try { await Task.Delay(_useSnapshot ? 3000 : 1500, _cts.Token); } catch { break; }
+                try { await Task.Delay(1000, _cts.Token); } catch { break; }
             }
         }
 
@@ -77,13 +63,6 @@ namespace IslandEye
             StatusChanged?.Invoke("Notification reader problem: " + msg);
         }
 
-        private void CloseLive()
-        {
-            try { _cmd?.Dispose(); } catch { }
-            try { _con?.Dispose(); } catch { }
-            _cmd = null; _con = null; _since = null;
-        }
-
         private void Poll()
         {
             if (!File.Exists(DbPath))
@@ -91,38 +70,10 @@ namespace IslandEye
 
             if (!_useSnapshot)
             {
-                try { QueryLive(); return; }
-                catch { CloseLive(); _useSnapshot = true; }   // locked? fall back to reading a copy
+                try { Query(DbPath, SqliteOpenMode.ReadOnly); return; }
+                catch (Exception) { _useSnapshot = true; }   // locked? fall back to reading a copy
             }
-            QuerySnapshot();
-        }
-
-        private void QueryLive()
-        {
-            if (_con == null)
-            {
-                var cs = new SqliteConnectionStringBuilder
-                { DataSource = DbPath, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString();
-                _con = new SqliteConnection(cs);
-                _con.Open();
-                _cmd = _con.CreateCommand();
-                _cmd.CommandText = Sql;
-                _since = _cmd.Parameters.Add("$since", SqliteType.Integer);
-            }
-            ReadRows(_cmd!, _since!);
-        }
-
-        private void QuerySnapshot()
-        {
-            string file = Snapshot();
-            var cs = new SqliteConnectionStringBuilder
-            { DataSource = file, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString();
-            using var con = new SqliteConnection(cs);
-            con.Open();
-            using var cmd = con.CreateCommand();
-            cmd.CommandText = Sql;
-            var p = cmd.Parameters.Add("$since", SqliteType.Integer);
-            ReadRows(cmd, p);
+            Query(Snapshot(), SqliteOpenMode.ReadWrite);
         }
 
         private static string Snapshot()
@@ -147,12 +98,22 @@ namespace IslandEye
             return Path.Combine(dir, "wpndatabase.db");
         }
 
-        private void ReadRows(SqliteCommand cmd, SqliteParameter sinceParam)
+        private void Query(string file, SqliteOpenMode mode)
         {
-            long since = Math.Max(_startFt, DateTime.UtcNow.AddMinutes(-10).ToFileTimeUtc());
-            sinceParam.Value = since;
+            var cs = new SqliteConnectionStringBuilder { DataSource = file, Mode = mode, Pooling = false }.ToString();
+            using var con = new SqliteConnection(cs);
+            con.Open();
 
-            List<ToastInfo>? fresh = null;
+            long since = Math.Max(_startFt, DateTime.UtcNow.AddMinutes(-10).ToFileTimeUtc());
+            using var cmd = con.CreateCommand();
+            cmd.CommandText =
+                "SELECT n.\"Order\", n.Id, n.ArrivalTime, n.Payload, h.PrimaryId " +
+                "FROM Notification n LEFT JOIN NotificationHandler h ON n.HandlerId = h.RecordId " +
+                "WHERE n.Type = 'toast' COLLATE NOCASE AND n.ArrivalTime >= $since " +
+                "ORDER BY n.ArrivalTime";
+            cmd.Parameters.AddWithValue("$since", since);
+
+            var fresh = new List<ToastInfo>();
             using (var r = cmd.ExecuteReader())
             {
                 while (r.Read())
@@ -172,13 +133,12 @@ namespace IslandEye
                     }
                     string appRaw = r.IsDBNull(4) ? "" : r.GetString(4);
                     var t = Parse(FriendlyName(appRaw), appRaw, xml);
-                    if (t != null) (fresh ??= new List<ToastInfo>()).Add(t);
+                    if (t != null) fresh.Add(t);
                 }
             }
 
-            if (_seen.Count > 0)
-                foreach (var k in _seen.Where(p => p.Value < since).Select(p => p.Key).ToList()) _seen.Remove(k);
-            if (fresh != null) foreach (var t in fresh) ToastReceived?.Invoke(t);
+            foreach (var k in _seen.Where(p => p.Value < since).Select(p => p.Key).ToList()) _seen.Remove(k);
+            foreach (var t in fresh) ToastReceived?.Invoke(t);
         }
 
         private static string Decode(byte[] b)
