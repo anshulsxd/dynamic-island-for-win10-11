@@ -1,38 +1,99 @@
-# Island — a Dynamic Island / Notch for Windows 10 & 11
+# 🌌 Dynamic Island for Windows
 
-A small pill (or MacBook-style notch) at the top of your screen. Hover to expand.
+**A smarter, more interactive desktop experience for Windows 10 and Windows 11.**
 
-## Features
-- Collapsed pill shows live weather ("Rainy · 18°C") — you choose the city, no location access
-- Expanded header: clock, weather, iPhone-style green battery ring
-- **Notifications**: every Windows notification (system + apps) pops out with the app's name and icon
-- **Device popups**: charger plugged in / out ⚡, USB devices, drives & SD cards 💾, headphones & audio 🎧,
-  monitors 🖥️, Ethernet cable 🌐
-- **Music** (Spotify or any player): cover art, timeline (dot appears on hover, click/drag to seek), prev / pause / next
-- **Controls**: Wi-Fi, Bluetooth, Airplane tiles + vertical Volume bar (+ Brightness bar on laptops)
-- Calculator, Calendar, Weather (city search, °C/°F)
-- **Alerts** log with a command box that runs CMD commands
-- Red power button: Exit island, Sleep (laptops), Restart, Shut down
-- **Version** tab: green Install button when a new GitHub release exists (see RELEASING.md)
-- Tray icon: Start with Windows, **Notch mode**, Show/Reset, Hide, Send test notification, Check for updates, Exit
+Bring quick controls, useful tools, notifications, and everyday information into one compact and interactive desktop interface.
 
-## Build the .exe
-Needs the free .NET 8 (or newer) SDK. In this folder run:
+Inspired by the Dynamic Island concept, this application brings a modern, customizable experience to your Windows desktop.
 
-    dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o out
+## ✨ Features
 
-Your app is `out\Island.exe`. (No SDK? See `BUILD_WITHOUT_INSTALLING.md`.)
+### 🎨 Interactive Interface
+- **Island & Notch Modes** – Switch between Dynamic Island and Notch layouts.
+- **Hover Interaction** – Expand the interface by moving your mouse pointer over it.
+- **Compact Design** – Keep useful information accessible without interrupting your workflow.
 
-## How notification popups work
-Windows' official notification-reader API needs a signed MSIX package identity, which a portable `.exe` doesn't
-have. Island instead reads Windows' local notification history (`%LocalAppData%\Microsoft\Windows\Notifications\wpndatabase.db`)
-read-only, once per second. Nothing leaves your PC. Limits: it's an undocumented file (a future Windows update could
-change it), up to ~1 s delay, and apps whose notifications are off in Windows Settings never reach it.
+### 🎵 Media Controls
+- Control your music playback directly from the island.
+- Access media controls without switching between applications.
+- Quickly interact with your currently playing media.
 
-## Notes
-- Errors are saved to `%LocalAppData%\IslandEye\log.txt`.
-- "Airplane" turns all radios off/on (it doesn't flip Windows' own airplane flag).
-- Brightness only appears on laptop screens that support it.
+### ⚙️ System Controls
+- **Wi-Fi Control** – Quick access to Wi-Fi controls.
+- **Bluetooth Control** – Convenient Bluetooth controls.
+- **Volume Control** – Adjust system audio levels.
+- **Brightness Control** – Adjust your display brightness.
 
-## License
-MIT
+### 🔔 Notifications
+- Interactive notification popups.
+- Get alerts directly on your desktop.
+- Stay informed without constantly switching windows.
+
+### 🧰 Built-in Utilities
+- **Command Line** – An integrated command-based interface for executing supported commands and actions.
+- **Calculator** – Perform quick calculations.
+- **Calendar** – Check dates using the built-in calendar.
+- **Weather** – View weather information for your selected city.
+
+### 🔄 In-App Updates
+- Get notified when a new version is available.
+- Update directly through the application's built-in update button.
+- No need to manually download every new version from the GitHub repository.
+
+## 🖥️ Compatibility
+
+- Windows 10
+- Windows 11
+
+## 📸 Screenshots
+
+![Dynamic Island](image-2.png)
+
+![Notch](image.png)
+
+![Maximized](image-1.png)
+
+## 🚀 Installation
+
+1. Visit the [Releases](https://github.com/anshulsxd/dynamic-island-for-win10-11/releases) section.
+2. Download the latest release.
+3. Follow the provided installation instructions.
+4. Launch Dynamic Island for Windows and explore its features.
+
+**Already installed?** Use the in-app update feature when a new release becomes available.
+
+## 🛠️ Development
+
+This project was developed following the **Vibe Coding** approach.
+
+Built through experimentation with AI-powered coding tools, combining ideas, prompts, testing, and iterations to create a functional Windows desktop application.
+
+## 🗺️ Roadmap
+
+Future improvements and possibilities:
+
+-  More island customization options
+-  More system controls
+-  Enhanced notification experience
+-  Performance optimizations
+
+## 🤝 Contributing
+
+Contributions, suggestions, and bug reports are welcome!
+
+- Report bugs through GitHub Issues.
+- Suggest new features.
+- Contribute improvements through Pull Requests.
+
+## ⚖️ Disclaimer
+
+Dynamic Island for Windows is an independent project inspired by the Dynamic Island concept. It is not affiliated with, endorsed by, or sponsored by Apple Inc.
+
+## 📄 License
+
+This project is licensed under the MIT License. See the [LICENSE](https://github.com/anshulsxd/dynamic-island-for-win10-11/blob/main/LICENSE) file for details.
+
+---
+
+**Made with curiosity and Vibe coding approach.**
+![Vibe Coding](https://img.shields.io/badge/Vibe%20Coding-red)
