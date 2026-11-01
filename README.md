@@ -57,8 +57,9 @@ Inspired by the Dynamic Island concept, this application brings a modern, custom
 
 1. Visit the [Releases](https://github.com/anshulsxd/dynamic-island-for-win10-11/releases) section.
 2. Download the latest release.
-3. Follow the provided installation instructions.
-4. Launch Dynamic Island for Windows and explore its features.
+3. Keep the executable file in an easily accessible location, such as your Desktop (recommended).
+4. Follow the provided installation instructions.
+5. Launch Dynamic Island for Windows and explore its features.
 
 **Already installed?** Use the in-app update feature when a new release becomes available.
 
