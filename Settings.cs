@@ -13,6 +13,8 @@ namespace IslandEye
         public bool HasLocation { get; set; }
         public bool Fahrenheit { get; set; }
         public bool NotchMode { get; set; }
+        public bool StartWithWindows { get; set; }
+        public bool? LiteMode { get; set; }   // null = decide automatically from installed RAM
         public string LastAnnouncedUpdate { get; set; } = "";
 
         private static string FilePath => Path.Combine(

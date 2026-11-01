@@ -71,7 +71,7 @@ namespace IslandEye
             // headphones / audio endpoints
             try
             {
-                foreach (var d in _enum.EnumerateAudioEndPoints(DataFlow.All, DeviceState.All))
+                foreach (var d in _enum.EnumerateAudioEndPoints(DataFlow.All, DeviceState.Active))
                 {
                     try { _names[d.ID] = d.FriendlyName; } catch { }
                 }
@@ -87,13 +87,14 @@ namespace IslandEye
 
             // charger + ethernet (polled)
             try { _eth = UpEthernet(); } catch { }
-            _timer = new Timer(_ => Poll(), null, 2000, 1500);
+            NetworkChange.NetworkAddressChanged += OnNetworkChanged;      // ethernet: event driven
+            _timer = new Timer(_ => PollPower(), null, 3000, 5000);       // charger: cheap check every 5 s (+ instant event)
         }
 
         public void Dispose()
         {
             try { _timer?.Dispose(); } catch { }
-            try { SystemEvents.DisplaySettingsChanged -= OnDisplay; SystemEvents.PowerModeChanged -= OnPowerMode; } catch { }
+            try { SystemEvents.DisplaySettingsChanged -= OnDisplay; SystemEvents.PowerModeChanged -= OnPowerMode; NetworkChange.NetworkAddressChanged -= OnNetworkChanged; } catch { }
             try { if (_notify != IntPtr.Zero) UnregisterDeviceNotification(_notify); } catch { }
             try { _src?.RemoveHook(WndProc); } catch { }
             try { if (_audioHooked) _enum.UnregisterEndpointNotificationCallback(this); } catch { }
@@ -269,38 +270,54 @@ namespace IslandEye
         private void OnPowerMode(object? sender, PowerModeChangedEventArgs e)
         {
             if (e.Mode == PowerModes.Resume) _quietUntil = DateTime.UtcNow.AddSeconds(20);   // devices re-appear after sleep
+            else if (e.Mode == PowerModes.StatusChange) Task.Run(PollPower);                 // AC plugged / unplugged
         }
 
-        // ---------- charger + ethernet ----------
-        private void Poll()
-        {
-            try
-            {
-                var ps = Forms.SystemInformation.PowerStatus;
-                bool hasBattery = (ps.BatteryChargeStatus & Forms.BatteryChargeStatus.NoSystemBattery) == 0;
-                if (hasBattery)
-                {
-                    bool online = ps.PowerLineStatus == Forms.PowerLineStatus.Online;
-                    int pct = (int)Math.Round(Math.Clamp(ps.BatteryLifePercent, 0, 1) * 100);
-                    if (_lastOnline.HasValue && online != _lastOnline.Value)
-                    {
-                        if (online)
-                            Raise(new ToastInfo("Power", pct >= 100 ? "Charger connected" : "Charging",
-                                pct >= 100 ? "Battery full" : $"Charger connected · {pct}%", "", "⚡"));
-                        else
-                            Raise(new ToastInfo("Power", "Charger disconnected", $"On battery · {pct}%", "", "🔋"));
-                    }
-                    _lastOnline = online;
-                }
-            }
-            catch { }
+        // ---------- charger + ethernet (event driven, no busy polling) ----------
+        private int _ethPending;
 
+        private void OnNetworkChanged(object? sender, EventArgs e)
+        {
+            if (Interlocked.Exchange(ref _ethPending, 1) == 1) return;   // debounce bursts of network events
+            Task.Run(async () =>
+            {
+                await Task.Delay(1200);
+                Interlocked.Exchange(ref _ethPending, 0);
+                CheckEthernet();
+            });
+        }
+
+        private void CheckEthernet()
+        {
             try
             {
                 var now = UpEthernet();
                 foreach (var n in now.Except(_eth)) Raise(new ToastInfo("Network", "Ethernet connected", n, "", "🌐"));
                 foreach (var n in _eth.Except(now)) Raise(new ToastInfo("Network", "Ethernet cable unplugged", n, "", "🌐"));
                 _eth = now;
+            }
+            catch { }
+        }
+
+        private void PollPower()
+        {
+            try
+            {
+                var ps = Forms.SystemInformation.PowerStatus;
+                bool hasBattery = (ps.BatteryChargeStatus & Forms.BatteryChargeStatus.NoSystemBattery) == 0;
+                if (!hasBattery) return;
+
+                bool online = ps.PowerLineStatus == Forms.PowerLineStatus.Online;
+                int pct = (int)Math.Round(Math.Clamp(ps.BatteryLifePercent, 0, 1) * 100);
+                if (_lastOnline.HasValue && online != _lastOnline.Value)
+                {
+                    if (online)
+                        Raise(new ToastInfo("Power", pct >= 100 ? "Charger connected" : "Charging",
+                            pct >= 100 ? "Battery full" : $"Charger connected · {pct}%", "", "⚡"));
+                    else
+                        Raise(new ToastInfo("Power", "Charger disconnected", $"On battery · {pct}%", "", "🔋"));
+                }
+                _lastOnline = online;
             }
             catch { }
         }

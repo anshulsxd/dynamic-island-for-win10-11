@@ -1,13 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Data;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Management;
 using System.Net.Http;
+using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -32,24 +32,44 @@ namespace IslandEye
         [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr h, int i);
         [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr h, int i, int v);
         private const int GWL_EXSTYLE = -20, WS_EX_TOOLWINDOW = 0x80;
+        [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        [DllImport("psapi.dll")] private static extern bool EmptyWorkingSet(IntPtr hProcess);
+        [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+        [DllImport("kernel32.dll")] private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX s);
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MEMORYSTATUSEX
+        {
+            public uint dwLength, dwMemoryLoad;
+            public ulong ullTotalPhys, ullAvailPhys, ullTotalPageFile, ullAvailPageFile, ullTotalVirtual, ullAvailVirtual, ullAvailExtendedVirtual;
+        }
+        private static readonly IntPtr HWND_TOPMOST = new(-1);
+        private const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOACTIVATE = 0x10;
 
         // ---------- Sizes ----------
         private const double CollapsedW = 250, CollapsedH = 36, ExpandedW = 680, ExpandedH = 340;
         private const double NotifW = 430, NotifH = 86;
+        // The window itself is only as big as what is on screen (a big transparent window is expensive to redraw)
+        private const double SmallWinW = 290, SmallWinH = 60, NotifWinW = 470, NotifWinH = 112, BigWinW = 720, BigWinH = 360;
         private const double BarH = 168;                 // height of the vertical volume / brightness bars
         private const double RingUnits = 27.02;          // battery ring circumference in stroke-thickness units
 
         // ---------- State ----------
-        private bool _expanded, _notch;
+        private bool _expanded, _notch, _lite, _controlsInit, _calcBuilt;
+        private int _winMode = -1, _animToken;
+        private IntPtr _hwnd;
+        private DateTime _lastActivity = DateTime.UtcNow;
+        private readonly BitmapCache _bitmapCache = new();
 
         private readonly DispatcherTimer _collapseTimer = new() { Interval = TimeSpan.FromMilliseconds(350) };
         private readonly DispatcherTimer _peekTimer = new() { Interval = TimeSpan.FromSeconds(5) };
-        private readonly DispatcherTimer _topTimer = new() { Interval = TimeSpan.FromSeconds(2) };
-        private readonly DispatcherTimer _clockTimer = new() { Interval = TimeSpan.FromSeconds(1) };
-        private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
+        private readonly DispatcherTimer _topTimer = new() { Interval = TimeSpan.FromSeconds(10) };
+        private readonly DispatcherTimer _clockTimer = new() { Interval = TimeSpan.FromSeconds(15) };
+        private readonly DispatcherTimer _progressTimer = new() { Interval = TimeSpan.FromSeconds(1) };
         private readonly DispatcherTimer _weatherTimer = new() { Interval = TimeSpan.FromMinutes(15) };
         private readonly DispatcherTimer _notifTimer = new() { Interval = TimeSpan.FromSeconds(5) };
         private readonly DispatcherTimer _updateTimer = new() { Interval = TimeSpan.FromHours(6) };
+        private readonly DispatcherTimer _trimTimer = new() { Interval = TimeSpan.FromSeconds(6) };
+        private readonly DispatcherTimer _idleTrimTimer = new() { Interval = TimeSpan.FromMinutes(3) };
         private readonly ObservableCollection<string> _alerts = new();
         private int _clockTicks, _progressTicks;
 
@@ -66,7 +86,8 @@ namespace IslandEye
         private bool _seeking;
 
         // Volume / brightness
-        private readonly MMDeviceEnumerator _devEnum = new();
+        private MMDeviceEnumerator? _devEnumInst;
+        private MMDeviceEnumerator DevEnum => _devEnumInst ??= new MMDeviceEnumerator();
         private AudioEndpointVolume? _epVol;
         private string _devName = "";
         private bool _draggingVol, _draggingBright, _brightSupported, _brightBusy;
@@ -110,7 +131,17 @@ namespace IslandEye
         private ReleaseInfo? _release;
         private bool _installing, _checkFailed;
 
-        private static SolidColorBrush Hex(string hex) => (SolidColorBrush)new BrushConverter().ConvertFromString(hex)!;
+        private static readonly Dictionary<string, SolidColorBrush> BrushCache = new();
+        private static SolidColorBrush Hex(string hex)
+        {
+            if (!BrushCache.TryGetValue(hex, out var b))
+            {
+                b = (SolidColorBrush)new BrushConverter().ConvertFromString(hex)!;
+                b.Freeze();
+                BrushCache[hex] = b;
+            }
+            return b;
+        }
         private bool InputFocused => CmdBox.IsKeyboardFocusWithin || CityBox.IsKeyboardFocusWithin;
         public bool NotchMode => _notch;
 
@@ -118,44 +149,44 @@ namespace IslandEye
         {
             InitializeComponent();
             _notch = _settings.NotchMode;
+            _lite = _settings.LiteMode ?? DetectLowEnd();
             ApplyShape();
-            PositionWindow();
+            SetWindowMode(0);
 
             AlertList.ItemsSource = _alerts;
-            AddAlert("Island started");
-            BuildCalc();
+            AddAlert("Island started" + (_lite ? " (lite mode)" : ""));
             ShowTab("Music");
-            UpdateClock();
             UpdateBattery();
             UpdateVolumeUI(0.5, false);
             UpdateBrightUI(0.5);
             WUnitBtn.Content = _settings.Fahrenheit ? "°F" : "°C";
             ApplyUpdateUi();
 
+            // these two only run while the island is expanded (started / stopped in SetExpanded)
             _clockTimer.Tick += (_, _) =>
             {
                 UpdateClock();
-                if (++_clockTicks % 30 == 0) UpdateBattery();
+                if (++_clockTicks % 2 == 0) UpdateBattery();
             };
-            _clockTimer.Start();
-
             _progressTimer.Tick += async (_, _) =>
             {
                 if (!_expanded) return;
                 _progressTicks++;
-                UpdateProgress();
+                if (MusicPanel.Visibility == Visibility.Visible) UpdateProgress();
                 if (ControlsPanel.Visibility == Visibility.Visible)
                 {
                     if (!_draggingVol) ReadVolumeUI();
-                    if (_brightSupported && !_draggingBright && !_brightBusy && _progressTicks % 4 == 0)
+                    if (_progressTicks % 5 == 0)
                     {
-                        int? b = await Task.Run(ReadBrightness);
-                        if (b.HasValue && !_draggingBright) UpdateBrightUI(b.Value / 100.0);
+                        if (_brightSupported && !_draggingBright && !_brightBusy)
+                        {
+                            int? b = await Task.Run(ReadBrightness);
+                            if (b.HasValue && !_draggingBright) UpdateBrightUI(b.Value / 100.0);
+                        }
+                        await RefreshRadiosAsync();
                     }
-                    if (_progressTicks % 10 == 0) await RefreshRadiosAsync();
                 }
             };
-            _progressTimer.Start();
 
             _collapseTimer.Tick += (_, _) =>
             {
@@ -168,12 +199,7 @@ namespace IslandEye
                 if (!Island.IsMouseOver && !InputFocused) SetExpanded(false);
             };
 
-            _topTimer.Tick += (_, _) =>
-            {
-                if (!IsVisible) return;
-                PositionWindow();
-                if (!InputFocused) { Topmost = false; Topmost = true; }   // stay above other windows
-            };
+            _topTimer.Tick += (_, _) => { if (IsVisible && !InputFocused) KeepOnTop(); };
             _topTimer.Start();
 
             _weatherTimer.Tick += async (_, _) => await RefreshWeatherAsync();
@@ -182,30 +208,135 @@ namespace IslandEye
             _updateTimer.Tick += async (_, _) => await CheckForUpdateAsync(true);
             _updateTimer.Start();
 
+            _trimTimer.Tick += (_, _) => { _trimTimer.Stop(); if (!_expanded && !_notifShowing) TrimMemory(); };
+            _idleTrimTimer.Tick += (_, _) =>
+            {
+                if (!_expanded && !_notifShowing && (DateTime.UtcNow - _lastActivity).TotalMinutes >= 2) TrimMemory();
+            };
+            _idleTrimTimer.Start();
+
             _notifTimer.Tick += (_, _) => { _notifTimer.Stop(); ShowNextNotification(); };
             _watcher.ToastReceived += t => Dispatcher.BeginInvoke(new Action(() => OnToast(t)));
             _watcher.StatusChanged += m => Dispatcher.BeginInvoke(new Action(() => AddAlert(m)));
-            _watcher.Start();
             _devices.Event += t => Dispatcher.BeginInvoke(new Action(() => OnToast(t)));
-            Closed += (_, _) => { _watcher.Dispose(); _devices.Dispose(); };
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
+            Closed += (_, _) =>
+            {
+                Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
+                _watcher.Dispose();
+                _devices.Dispose();
+            };
 
+            // heavy things start a little later, so Island appears instantly even on slow PCs
             Loaded += async (_, _) =>
             {
                 MoveUnderline(_currentTabBtn, false);
                 _ = RefreshWeatherAsync();
-                _ = InitBrightnessAsync();
-                _ = RefreshRadiosAsync();
-                _ = DelayedUpdateCheckAsync();
                 await InitMediaAsync();
+                await Task.Delay(2500);
+                _watcher.Start();
+                try { _devices.Start(_hwnd); }
+                catch (Exception ex) { AddAlert("Device monitor problem: " + ex.Message); }
+                _ = DelayedUpdateCheckAsync();
+                ScheduleTrim();
             };
 
             SourceInitialized += (_, _) =>
             {
-                var h = new System.Windows.Interop.WindowInteropHelper(this).Handle;
-                SetWindowLong(h, GWL_EXSTYLE, GetWindowLong(h, GWL_EXSTYLE) | WS_EX_TOOLWINDOW);   // hide from Alt+Tab
-                try { _devices.Start(h); }
-                catch (Exception ex) { AddAlert("Device monitor problem: " + ex.Message); }
+                _hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                SetWindowLong(_hwnd, GWL_EXSTYLE, GetWindowLong(_hwnd, GWL_EXSTYLE) | WS_EX_TOOLWINDOW);   // hide from Alt+Tab
             };
+        }
+
+        // ================= PERFORMANCE HELPERS =================
+        private static bool DetectLowEnd()
+        {
+            try
+            {
+                var m = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
+                if (GlobalMemoryStatusEx(ref m) && m.ullTotalPhys > 0 && m.ullTotalPhys <= 8_600_000_000UL) return true;
+            }
+            catch { }
+            return Environment.ProcessorCount <= 2;
+        }
+
+        public bool LiteMode => _lite;
+
+        public void SetLiteMode(bool on)
+        {
+            _lite = on;
+            _settings.LiteMode = on;
+            _settings.Save();
+        }
+
+        /// <summary>Tray toggle "Start with Windows" (the choice is also remembered in settings so it can self-heal).</summary>
+        public void SetStartWithWindows(bool on)
+        {
+            _settings.StartWithWindows = on;
+            _settings.Save();
+            try { StartupManager.Set(on); }
+            catch (Exception ex) { AddAlert("Couldn't change Start with Windows: " + ex.Message); }
+        }
+
+        public void RepairAutostart() => StartupManager.Repair(_settings.StartWithWindows);
+
+        /// <summary>
+        /// The window keeps ONE fixed size. Resizing a transparent window while the island animates makes it
+        /// flicker and jump sideways for a frame, and an idle transparent window costs almost nothing.
+        /// </summary>
+        private void SetWindowMode(int mode)
+        {
+            if (_winMode == 2) return;
+            _winMode = 2;
+            Width = BigWinW;
+            Height = BigWinH;
+            PositionWindow();
+        }
+
+        private void OnDisplayChanged(object? sender, EventArgs e)
+            => Dispatcher.BeginInvoke(new Action(PositionWindow));
+
+        private void KeepOnTop()
+        {
+            if (_hwnd != IntPtr.Zero)
+                SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE);
+        }
+
+        private void ScheduleTrim()
+        {
+            _trimTimer.Stop();
+            _trimTimer.Start();
+        }
+
+        /// <summary>Gives memory back to Windows (runs only while the island is idle).</summary>
+        public static void TrimMemory()
+        {
+            try
+            {
+                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                GC.WaitForPendingFinalizers();
+                GC.Collect(2, GCCollectionMode.Forced, true, true);
+                EmptyWorkingSet(GetCurrentProcess());
+            }
+            catch { }
+        }
+
+        private void FadeTo(UIElement e, double to, int ms, int delay = 0, double? from = null, Action? done = null)
+        {
+            double cur = e.Opacity;                       // keep the current (possibly mid-animation) value
+            e.BeginAnimation(OpacityProperty, null);
+            e.Opacity = from ?? cur;
+            if (_lite) { ms = ms * 2 / 3; delay = delay * 2 / 3; }
+            if (ms <= 0)
+            {
+                e.Opacity = to;
+                done?.Invoke();
+                return;
+            }
+            var a = new DoubleAnimation(to, TimeSpan.FromMilliseconds(ms)) { BeginTime = TimeSpan.FromMilliseconds(delay) };
+            if (done != null) a.Completed += (_, _) => done();
+            e.BeginAnimation(OpacityProperty, a);
         }
 
         private void PositionWindow()
@@ -295,32 +426,49 @@ namespace IslandEye
         {
             if (_expanded == expand) return;
             _expanded = expand;
-            if (expand) CancelNotification();
 
-            IEasingFunction ease = expand
-                ? new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.25 }
-                : new CubicEase { EasingMode = EasingMode.EaseInOut };
-            var dur = TimeSpan.FromMilliseconds(expand ? 380 : 260);
+            if (expand)
+            {
+                CancelNotification();
+                _lastActivity = DateTime.UtcNow;
+                _trimTimer.Stop();
+                _clockTimer.Start();
+                _progressTimer.Start();
+                // cheap refresh right after the first frame, so the opening animation never waits for it
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (!_expanded) return;
+                    UpdateClock();
+                    UpdateBattery();
+                    UpdateProgress();
+                    if (ControlsPanel.Visibility == Visibility.Visible) ReadVolumeUI();
+                }), DispatcherPriority.Loaded);
+            }
+            else
+            {
+                _clockTimer.Stop();
+                _progressTimer.Stop();
+                ClosePowerMenu();
+            }
 
-            Island.BeginAnimation(WidthProperty,
-                new DoubleAnimation(expand ? ExpandedW : CollapsedW, dur) { EasingFunction = ease });
-            Island.BeginAnimation(HeightProperty,
-                new DoubleAnimation(expand ? ExpandedH : CollapsedH, dur) { EasingFunction = ease });
-            Island.CornerRadius = Corner(expand ? 28 : 18);
+            AnimateIsland(expand ? ExpandedW : CollapsedW, expand ? ExpandedH : CollapsedH, expand ? 28 : 18,
+                expand ? 380 : 260, springy: expand, radiusAtEnd: !expand,
+                done: expand ? null : () => Body.CacheMode = null);
 
-            CollapsedHeader.BeginAnimation(OpacityProperty,
-                new DoubleAnimation(expand ? 0 : 1, TimeSpan.FromMilliseconds(150))
-                { BeginTime = TimeSpan.FromMilliseconds(expand ? 0 : 120) });
-            ExpandedHeader.BeginAnimation(OpacityProperty,
-                new DoubleAnimation(expand ? 1 : 0, TimeSpan.FromMilliseconds(180))
-                { BeginTime = TimeSpan.FromMilliseconds(expand ? 150 : 0) });
-            Body.BeginAnimation(OpacityProperty,
-                new DoubleAnimation(expand ? 1 : 0, TimeSpan.FromMilliseconds(180))
-                { BeginTime = TimeSpan.FromMilliseconds(expand ? 140 : 0) });
+            if (expand)
+            {
+                if (!_lite) Body.CacheMode = _bitmapCache;           // cheap fade: blend one cached bitmap
+                FadeTo(CollapsedHeader, 0, 150);
+                FadeTo(ExpandedHeader, 1, 180, 150);
+                FadeTo(Body, 1, 180, 140, done: () => Body.CacheMode = null);
+            }
+            else
+            {
+                FadeTo(ExpandedHeader, 0, 120);
+                FadeTo(Body, 0, 120);
+                FadeTo(CollapsedHeader, 1, 180, 120);
+            }
             Body.IsHitTestVisible = expand;
-
-            if (expand) { Vol(true); ReadVolumeUI(); UpdateProgress(); }
-            else ClosePowerMenu();
         }
 
         // Briefly pop open (e.g. when the song changes)
@@ -402,7 +550,9 @@ namespace IslandEye
             {
                 Vol(true); ReadVolumeUI();
                 _ = RefreshRadiosAsync();
+                if (!_controlsInit) { _controlsInit = true; _ = InitBrightnessAsync(); }   // WMI is loaded only if you open this tab
             }
+            if (name == "Calc" && !_calcBuilt) { _calcBuilt = true; BuildCalc(); }
             if (name == "Calendar")
             {
                 _calMonth = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1);
@@ -656,6 +806,7 @@ namespace IslandEye
                     ms.Position = 0;
                     var bmp = new BitmapImage();
                     bmp.BeginInit();
+                    bmp.DecodePixelWidth = 160;                       // tiny decode = far less RAM
                     bmp.CacheOption = BitmapCacheOption.OnLoad;
                     bmp.StreamSource = ms;
                     bmp.EndInit();
@@ -788,7 +939,7 @@ namespace IslandEye
             {
                 if (_epVol == null || refetch)
                 {
-                    var d = _devEnum.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+                    var d = DevEnum.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
                     _devName = d.FriendlyName;
                     _epVol = d.AudioEndpointVolume;
                 }
@@ -1065,6 +1216,56 @@ namespace IslandEye
             }
         }
 
+        // tiny expression evaluator (+ - * / parentheses) - avoids loading the heavy System.Data library
+        private static double Evaluate(string s)
+        {
+            int pos = 0;
+            s = s.Replace(" ", "");
+            double Expr()
+            {
+                double v = Term();
+                while (pos < s.Length && (s[pos] == '+' || s[pos] == '-'))
+                {
+                    char op = s[pos++];
+                    double r = Term();
+                    v = op == '+' ? v + r : v - r;
+                }
+                return v;
+            }
+            double Term()
+            {
+                double v = Factor();
+                while (pos < s.Length && (s[pos] == '*' || s[pos] == '/'))
+                {
+                    char op = s[pos++];
+                    double r = Factor();
+                    v = op == '*' ? v * r : v / r;
+                }
+                return v;
+            }
+            double Factor()
+            {
+                if (pos >= s.Length) throw new FormatException();
+                if (s[pos] == '-') { pos++; return -Factor(); }
+                if (s[pos] == '+') { pos++; return Factor(); }
+                if (s[pos] == '(')
+                {
+                    pos++;
+                    double v = Expr();
+                    if (pos >= s.Length || s[pos] != ')') throw new FormatException();
+                    pos++;
+                    return v;
+                }
+                int start = pos;
+                while (pos < s.Length && (char.IsDigit(s[pos]) || s[pos] == '.')) pos++;
+                if (start == pos) throw new FormatException();
+                return double.Parse(s[start..pos], CultureInfo.InvariantCulture);
+            }
+            double result = Expr();
+            if (pos != s.Length) throw new FormatException();
+            return result;
+        }
+
         private void CalcPress(string k)
         {
             string cur = CalcDisplay.Text;
@@ -1079,7 +1280,7 @@ namespace IslandEye
                 case "=":
                     try
                     {
-                        var r = Convert.ToDouble(new DataTable().Compute(cur, null), CultureInfo.InvariantCulture);
+                        var r = Evaluate(cur);
                         CalcDisplay.Text = double.IsNaN(r) || double.IsInfinity(r)
                             ? "Error" : r.ToString("G12", CultureInfo.InvariantCulture);
                     }
@@ -1166,7 +1367,7 @@ namespace IslandEye
         private void AddLine(string text)
         {
             _alerts.Add(text);
-            if (_alerts.Count > 400) _alerts.RemoveAt(0);
+            if (_alerts.Count > 120) _alerts.RemoveAt(0);
             ScrollLogToEnd();
         }
 
@@ -1271,13 +1472,31 @@ namespace IslandEye
         }
 
         // ================= POPUPS: notifications + device events =================
-        private void AnimateIsland(double w, double h, double radius, int ms = 320)
+        private void AnimateIsland(double w, double h, double radius, int ms, bool springy = false,
+                                   Action? done = null, bool radiusAtEnd = false)
         {
-            var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+            int token = ++_animToken;
+            if (!radiusAtEnd) Island.CornerRadius = Corner(radius);      // growing: round it straight away
+            if (_lite) { ms = ms * 2 / 3; springy = false; }
+
+            IEasingFunction ease = springy
+                ? new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.25 }
+                : new CubicEase { EasingMode = EasingMode.EaseOut };
             var dur = TimeSpan.FromMilliseconds(ms);
-            Island.BeginAnimation(WidthProperty, new DoubleAnimation(w, dur) { EasingFunction = ease });
-            Island.BeginAnimation(HeightProperty, new DoubleAnimation(h, dur) { EasingFunction = ease });
-            Island.CornerRadius = Corner(radius);
+            var aw = new DoubleAnimation(w, dur) { EasingFunction = ease };
+            var ah = new DoubleAnimation(h, dur) { EasingFunction = ease };
+            ah.Completed += (_, _) =>
+            {
+                if (token != _animToken) return;                  // a newer animation took over
+                Island.BeginAnimation(WidthProperty, null);       // release the animation clocks
+                Island.BeginAnimation(HeightProperty, null);
+                Island.Width = w;
+                Island.Height = h;
+                if (radiusAtEnd) Island.CornerRadius = Corner(radius);   // shrinking: no corner "snap" at the start
+                done?.Invoke();
+            };
+            Island.BeginAnimation(WidthProperty, aw);
+            Island.BeginAnimation(HeightProperty, ah);
         }
 
         private void OnToast(ToastInfo t)
@@ -1299,6 +1518,7 @@ namespace IslandEye
             }
             if (app.Equals("Island", StringComparison.OrdinalIgnoreCase)) return;   // ignore our own tray balloon
 
+            if (t.App == "Audio") _epVol = null;
             var item = t with { App = app, Emoji = emoji };
             AddLine($"[{DateTime.Now:HH:mm}] {emoji} {app}: {t.Title}" + (t.Body.Length > 0 ? " — " + t.Body : ""));
 
@@ -1329,11 +1549,11 @@ namespace IslandEye
             if (!_notifShowing)
             {
                 _notifShowing = true;
-                AnimateIsland(NotifW, NotifH, 26);
-                CollapsedHeader.BeginAnimation(OpacityProperty, new DoubleAnimation(0, TimeSpan.FromMilliseconds(120)));
+                _lastActivity = DateTime.UtcNow;
+                AnimateIsland(NotifW, NotifH, 26, 320);
+                FadeTo(CollapsedHeader, 0, 120);
                 NotifCard.IsHitTestVisible = true;
-                NotifCard.BeginAnimation(OpacityProperty,
-                    new DoubleAnimation(1, TimeSpan.FromMilliseconds(200)) { BeginTime = TimeSpan.FromMilliseconds(120) });
+                FadeTo(NotifCard, 1, 200, 120);
             }
             _notifTimer.Stop();
             _notifTimer.Start();
@@ -1345,12 +1565,11 @@ namespace IslandEye
             if (!_notifShowing) return;
             _notifShowing = false;
             NotifCard.IsHitTestVisible = false;
-            NotifCard.BeginAnimation(OpacityProperty, new DoubleAnimation(0, TimeSpan.FromMilliseconds(120)));
+            FadeTo(NotifCard, 0, 120);
             if (!_expanded)
             {
-                AnimateIsland(CollapsedW, CollapsedH, 18, 280);
-                CollapsedHeader.BeginAnimation(OpacityProperty,
-                    new DoubleAnimation(1, TimeSpan.FromMilliseconds(180)) { BeginTime = TimeSpan.FromMilliseconds(150) });
+                AnimateIsland(CollapsedW, CollapsedH, 18, 280, radiusAtEnd: true);
+                FadeTo(CollapsedHeader, 1, 180, 150);
             }
         }
 
@@ -1362,7 +1581,7 @@ namespace IslandEye
             if (!_notifShowing) return;
             _notifShowing = false;
             NotifCard.IsHitTestVisible = false;
-            NotifCard.BeginAnimation(OpacityProperty, new DoubleAnimation(0, TimeSpan.FromMilliseconds(100)));
+            FadeTo(NotifCard, 0, 100);
         }
 
         private void NotifCard_Click(object s, MouseButtonEventArgs e)
