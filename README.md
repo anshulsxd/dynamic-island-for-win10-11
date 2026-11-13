@@ -32,7 +32,7 @@ Inspired by the Dynamic Island concept, this application brings a modern, custom
 ### 🧰 Built-in Utilities
 - **Command Line** – An integrated command-based interface for executing supported commands and actions.
 - **Calculator** – Perform quick calculations.
-- **Calendar** – Check dates using the built-in calendar.
+- **Dock** – Pin your apps for quickly accessibility.
 - **Weather** – View weather information for your selected city.
 
 ### 🔄 In-App Updates
@@ -51,7 +51,7 @@ Inspired by the Dynamic Island concept, this application brings a modern, custom
 
 ![Notch](image.png)
 
-![Maximized](image-1.png)
+![Maximized](UpdateIMG_1.png)
 
 ## 🚀 Installation
 
